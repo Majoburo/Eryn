@@ -276,6 +276,11 @@ class TemperatureControl(object):
         self.skip_swap_supp_names = skip_swap_supp_names
         self.non_adjacent_swaps = non_adjacent_swaps
 
+        # Running variance of log-likelihood per temperature (EWMA), for thermo-length spacing
+        self.var_logl = np.zeros(self.ntemps, dtype=float)
+        self._var_alpha = 0.05  # EWMA blending for variance updates
+        self.thermo_adapt = False  # when True, use variance-based ladder adaptation
+
         # number of times adapted
         self.time = 0
 
@@ -525,65 +530,84 @@ class TemperatureControl(object):
 
         ntemps, nwalkers = self.ntemps, self.nwalkers
 
+        # Update EWMA of per-temperature logl variance (energy fluctuations)
+        cur_var = np.var(logl, axis=1)
+        self.var_logl = (1.0 - self._var_alpha) * self.var_logl + self._var_alpha * cur_var
+
         # prepare information on how many swaps are accepted this time
-        self.swaps_accepted = np.empty(ntemps - 1)
+        if self.non_adjacent_swaps:
+            # For non-adjacent, track all pairs in a matrix, but also track adjacent for adaptation
+            self.swaps_accepted_matrix_step = np.zeros((ntemps, ntemps))
+            self.swaps_accepted = np.zeros(ntemps - 1)
+        else:
+            self.swaps_accepted = np.empty(ntemps - 1)
 
-        # iterate through temperature pairs
-        for swap_idx in range(ntemps - 1):
-            if self.non_adjacent_swaps:
-                # Randomly select two different temperature indices
-                i, j = np.random.choice(ntemps, size=2, replace=False)
-                # Ensure i > j for consistency (higher temp index is i)
-                if i < j:
-                    i, j = j, i
-            else:
-                # Adjacent-only: cascade from highest to lowest
-                i = ntemps - 1 - swap_idx
-                j = i - 1
+        if self.non_adjacent_swaps:
+            # SAFE path: random disjoint pairs (uniform), size ~ ntemps/2
+            order = np.random.permutation(ntemps)
+            pair_iter = []
+            k = 0
+            while k + 1 < ntemps:
+                i = order[k + 1]
+                j = order[k]
+                pair_iter.append((int(max(i, j)), int(min(i, j))))
+                k += 2
+        else:
+            # Adjacent-only cascade from high to low: pairs are (i,j) with j=i-1
+            pair_iter = [(ntemps - 1 - k, ntemps - 2 - k) for k in range(ntemps - 1)]
 
+        # Attempt swaps for the chosen disjoint pairs
+        for (i, j) in pair_iter:
             # get both temperature rungs
             bi = self.betas[i]
             bj = self.betas[j]
-
-            # difference in inverse temps
             dbeta = bj - bi
 
-            # permute the indices for the walkers in each temperature to randomize swap positions
+            # permute walker indices per temperature tier
             if self.permute:
                 iperm = np.random.permutation(nwalkers)
                 jperm = np.random.permutation(nwalkers)
-
-            # do not permute if desired
             else:
                 iperm = np.arange(nwalkers)
                 jperm = np.arange(nwalkers)
 
-            # random draw that produces log of the acceptance fraction
+            # Acceptance test per walker
             raccept = np.log(np.random.uniform(size=nwalkers))
-
-            # log of the detailed balance fraction
             paccept = dbeta * (logl[i, iperm] - logl[j, jperm])
-
-            # How many swaps were accepted
             sel = paccept > raccept
-            self.swaps_accepted[swap_idx] = np.sum(sel)
+            num_accepted = np.sum(sel)
 
-            (x, logP, logl, logp, inds, blobs, supps, branch_supps) = (
-                self.do_swaps_indexing(
-                    i,
-                    iperm[sel],
-                    jperm[sel],
-                    dbeta,
-                    x,
-                    logP,
-                    logl,
-                    logp,
-                    inds=inds,
-                    blobs=blobs,
-                    supps=supps,
-                    branch_supps=branch_supps,
-                    j=j,
-                )
+            # Accounting: proposed/accepted
+            if self.non_adjacent_swaps:
+                self.swaps_proposed[i, j] += nwalkers
+                self.swaps_proposed[j, i] += nwalkers
+                self.swaps_accepted_matrix[i, j] += num_accepted
+                self.swaps_accepted_matrix[j, i] += num_accepted
+                self.swaps_accepted_matrix_step[i, j] = num_accepted
+                self.swaps_accepted_matrix_step[j, i] = num_accepted
+                if abs(i - j) == 1:
+                    adj_idx = min(i, j)
+                    self.swaps_accepted[adj_idx] = num_accepted
+            else:
+                # adjacent mode keeps the original vector accounting; map (i,j) to swap index
+                swap_idx = i  # since j=i-1 and i goes from ntemps-1..1
+                self.swaps_accepted[swap_idx - 1] = num_accepted
+
+            # Perform the actual swaps for selected walkers
+            (x, logP, logl, logp, inds, blobs, supps, branch_supps) = self.do_swaps_indexing(
+                i,
+                iperm[sel],
+                jperm[sel],
+                dbeta,
+                x,
+                logP,
+                logl,
+                logp,
+                inds=inds,
+                blobs=blobs,
+                supps=supps,
+                branch_supps=branch_supps,
+                j=j,
             )
 
         return (x, logP, logl, logp, inds, blobs, supps, branch_supps)
@@ -612,15 +636,41 @@ class TemperatureControl(object):
 
     def adapt_temps(self):
         # determine ratios of swaps accepted to swaps proposed (the ladder is fixed)
-        ratios = self.swaps_accepted / self.swaps_proposed
+        if self.non_adjacent_swaps:
+            # For non-adjacent swaps, extract adjacent swap rates from matrices for ladder adaptation
+            # Extract diagonal elements for i and i+1 pairs
+            adj_accepted = np.array([self.swaps_accepted_matrix[i, i+1] for i in range(self.ntemps-1)])
+            adj_proposed = np.array([self.swaps_proposed[i, i+1] for i in range(self.ntemps-1)])
+            # Avoid division by zero
+            ratios = np.where(adj_proposed > 0, adj_accepted / adj_proposed, 0.25)
+        else:
+            ratios = self.swaps_accepted / self.swaps_proposed
+
+        # Optional: thermodynamic-length spacing using running Var_beta[U]
+        use_thermo = self.thermo_adapt and np.all(np.isfinite(self.var_logl)) and np.any(self.var_logl > 0)
 
         # adapt if desired
         if self.adaptive and self.ntemps > 1:
             if self.stop_adaptation < 0 or self.time < self.stop_adaptation:
-                dbetas = self._get_ladder_adjustment(self.time, self.betas, ratios)
-                self.betas += dbetas
-
-            # only increase time if it is adaptive.
+                if use_thermo:
+                    # Adjust neighbor gaps toward const / sqrt(var)
+                    gaps = np.diff(self.betas)
+                    target = np.sum(gaps)
+                    w = 1.0 / np.sqrt(np.maximum(self.var_logl[:-1], 1e-12))
+                    w /= np.sum(w)
+                    desired = target * w
+                    # Hyperbolic decay step size as in original scheme
+                    decay = self.adaptation_lag / (self.time + self.adaptation_lag)
+                    kappa = decay / self.adaptation_time
+                    new_gaps = (1.0 - kappa) * gaps + kappa * desired
+                    betas_new = np.empty_like(self.betas)
+                    betas_new[0] = self.betas[0]
+                    betas_new[1:] = betas_new[0] + np.cumsum(new_gaps)
+                    self.betas = betas_new
+                else:
+                    dbetas = self._get_ladder_adjustment(self.time, self.betas, ratios)
+                    self.betas += dbetas
+            # only increase time if it is adaptive
             self.time += 1
 
     def temper_comps(self, state, adapt=True):
