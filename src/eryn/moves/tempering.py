@@ -579,12 +579,11 @@ class TemperatureControl(object):
 
             # Accounting: proposed/accepted
             if self.non_adjacent_swaps:
+                # Store in matrix at [i, j] where i > j (lower triangle, consistent with pair_iter)
                 self.swaps_proposed[i, j] += nwalkers
-                self.swaps_proposed[j, i] += nwalkers
                 self.swaps_accepted_matrix[i, j] += num_accepted
-                self.swaps_accepted_matrix[j, i] += num_accepted
                 self.swaps_accepted_matrix_step[i, j] = num_accepted
-                self.swaps_accepted_matrix_step[j, i] = num_accepted
+                # Track adjacent pairs separately for adaptation
                 if abs(i - j) == 1:
                     adj_idx = min(i, j)
                     self.swaps_accepted[adj_idx] = num_accepted
@@ -638,9 +637,9 @@ class TemperatureControl(object):
         # determine ratios of swaps accepted to swaps proposed (the ladder is fixed)
         if self.non_adjacent_swaps:
             # For non-adjacent swaps, extract adjacent swap rates from matrices for ladder adaptation
-            # Extract diagonal elements for i and i+1 pairs
-            adj_accepted = np.array([self.swaps_accepted_matrix[i, i+1] for i in range(self.ntemps-1)])
-            adj_proposed = np.array([self.swaps_proposed[i, i+1] for i in range(self.ntemps-1)])
+            # Read from lower triangle [i+1, i] (since we store pairs as [max, min])
+            adj_accepted = np.array([self.swaps_accepted_matrix[i+1, i] for i in range(self.ntemps-1)])
+            adj_proposed = np.array([self.swaps_proposed[i+1, i] for i in range(self.ntemps-1)])
             # Avoid division by zero
             ratios = np.where(adj_proposed > 0, adj_accepted / adj_proposed, 0.25)
         else:
@@ -654,19 +653,39 @@ class TemperatureControl(object):
             if self.stop_adaptation < 0 or self.time < self.stop_adaptation:
                 if use_thermo:
                     # Adjust neighbor gaps toward const / sqrt(var)
-                    gaps = np.diff(self.betas)
-                    target = np.sum(gaps)
-                    w = 1.0 / np.sqrt(np.maximum(self.var_logl[:-1], 1e-12))
-                    w /= np.sum(w)
-                    desired = target * w
-                    # Hyperbolic decay step size as in original scheme
-                    decay = self.adaptation_lag / (self.time + self.adaptation_lag)
-                    kappa = decay / self.adaptation_time
-                    new_gaps = (1.0 - kappa) * gaps + kappa * desired
-                    betas_new = np.empty_like(self.betas)
-                    betas_new[0] = self.betas[0]
-                    betas_new[1:] = betas_new[0] + np.cumsum(new_gaps)
-                    self.betas = betas_new
+                    # IMPORTANT: Fix both endpoints (cold and hot chains don't move)
+                    # Only adapt intermediate temperatures betas[1:-1]
+                    if self.ntemps > 2:
+                        # Current gaps (negative for descending betas)
+                        current_gaps = np.diff(self.betas)
+
+                        # Total span to preserve (negative)
+                        total_span = np.sum(current_gaps)
+
+                        # Variance weights (higher variance → larger gap magnitude)
+                        w = 1.0 / np.sqrt(np.maximum(self.var_logl[:-1], 1e-12))
+                        w /= np.sum(w)
+
+                        # Desired gap sizes (maintain negative sign for descending)
+                        desired_gaps = total_span * w
+
+                        # Hyperbolic decay step size
+                        decay = self.adaptation_lag / (self.time + self.adaptation_lag)
+                        kappa = decay / self.adaptation_time
+
+                        # Blend current and desired gaps
+                        new_gaps = (1.0 - kappa) * current_gaps + kappa * desired_gaps
+
+                        # Reconstruct ladder: fix betas[0] and betas[-1]
+                        betas_new = np.empty_like(self.betas)
+                        betas_new[0] = self.betas[0]  # Cold chain always at β=1
+                        betas_new[1:] = betas_new[0] + np.cumsum(new_gaps)
+
+                        # Force last beta back to initial value to prevent drift
+                        betas_new[-1] = self.betas[-1]
+
+                        self.betas = betas_new
+                    # else: ntemps <= 2, no intermediate temperatures to adapt
                 else:
                     dbetas = self._get_ladder_adjustment(self.time, self.betas, ratios)
                     self.betas += dbetas
