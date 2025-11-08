@@ -294,6 +294,9 @@ class TemperatureControl(object):
         if self.non_adjacent_swaps:
             self.swaps_proposed = np.zeros((self.ntemps, self.ntemps))
             self.swaps_accepted_matrix = np.zeros((self.ntemps, self.ntemps))
+            # Track adjacent pairs separately for proper statistics
+            self.adj_swaps_proposed = np.zeros(self.ntemps - 1)
+            self.adj_swaps_accepted = np.zeros(self.ntemps - 1)
         else:
             self.swaps_proposed = np.full(self.ntemps - 1, self.nwalkers)
 
@@ -583,10 +586,12 @@ class TemperatureControl(object):
                 self.swaps_proposed[i, j] += nwalkers
                 self.swaps_accepted_matrix[i, j] += num_accepted
                 self.swaps_accepted_matrix_step[i, j] = num_accepted
-                # Track adjacent pairs separately for adaptation
+                # Track adjacent pairs separately for proper statistics
                 if abs(i - j) == 1:
                     adj_idx = min(i, j)
-                    self.swaps_accepted[adj_idx] = num_accepted
+                    self.adj_swaps_proposed[adj_idx] += nwalkers
+                    self.adj_swaps_accepted[adj_idx] += num_accepted
+                    self.swaps_accepted[adj_idx] = num_accepted  # For this iteration only
             else:
                 # adjacent mode keeps the original vector accounting; map (i,j) to swap index
                 swap_idx = i  # since j=i-1 and i goes from ntemps-1..1
