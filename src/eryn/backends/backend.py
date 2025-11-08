@@ -190,6 +190,7 @@ class Backend(object):
         # setup all the holder arrays
         self.accepted = np.zeros((self.ntemps, self.nwalkers), dtype=self.dtype)
         self.swaps_accepted = np.zeros((self.ntemps - 1,), dtype=self.dtype)
+        self.swaps_proposed = np.zeros((self.ntemps - 1,), dtype=self.dtype)
         if self.rj:
             self.rj_accepted = np.zeros((self.ntemps, self.nwalkers), dtype=self.dtype)
 
@@ -1008,6 +1009,7 @@ class Backend(object):
         accepted,
         rj_accepted=None,
         swaps_accepted=None,
+        swaps_proposed=None,
         moves_accepted_fraction=None,
     ):
         """Save a step to the backend
@@ -1023,6 +1025,8 @@ class Backend(object):
                 is False, then rj_accepted must be None, which is the default.
             swaps_accepted (ndarray, optional): 1D array with number of swaps accepted
                 for the in-model step. (default: ``None``)
+            swaps_proposed (ndarray, optional): 1D array with number of swaps proposed
+                for the in-model step. Used for non-adjacent tempering. (default: ``None``)
             moves_accepted_fraction (dict, optional): Dict of acceptance fraction arrays for all of the
                 moves in the sampler. This dict must have the same keys as ``self.move_keys``.
                 (default: ``None``)
@@ -1061,6 +1065,8 @@ class Backend(object):
 
         if swaps_accepted is not None:
             self.swaps_accepted += swaps_accepted
+        if swaps_proposed is not None:
+            self.swaps_proposed += swaps_proposed
         if self.rj:
             self.rj_accepted += rj_accepted
 

@@ -972,8 +972,14 @@ class EnsembleSampler(object):
                         accepted += accepted_out
                         if self.ntemps > 1:
                             in_model_swaps = move.temperature_control.swaps_accepted
+                            # Get adjacent swap proposals for non-adjacent mode
+                            if hasattr(move.temperature_control, 'adj_swaps_proposed'):
+                                in_model_swaps_proposed = move.temperature_control.adj_swaps_proposed.copy()
+                            else:
+                                in_model_swaps_proposed = None
                         else:
                             in_model_swaps = None
+                            in_model_swaps_proposed = None
 
                         state.random_state = self.random_state
 
@@ -1021,6 +1027,7 @@ class EnsembleSampler(object):
                             accepted,
                             rj_accepted=rj_accepted,
                             swaps_accepted=in_model_swaps,
+                            swaps_proposed=in_model_swaps_proposed,
                             moves_accepted_fraction=moves_accepted_fraction,
                         )
 
@@ -1550,9 +1557,14 @@ class EnsembleSampler(object):
     @property
     def swap_acceptance_fraction(self):
         """The fraction of proposed temperature swaps that were accepted"""
-        return self.backend.swaps_accepted / float(
-            self.backend.iteration * self.nwalkers
-        )
+        # Use actual proposal counts if available (non-adjacent mode)
+        if np.any(self.backend.swaps_proposed > 0):
+            return self.backend.swaps_accepted / np.maximum(self.backend.swaps_proposed, 1.0)
+        else:
+            # Fall back to old calculation (adjacent mode)
+            return self.backend.swaps_accepted / float(
+                self.backend.iteration * self.nwalkers
+            )
 
     def get_chain(self, **kwargs):
         return self.get_value("chain", **kwargs)
