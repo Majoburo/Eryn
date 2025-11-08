@@ -681,13 +681,21 @@ class TemperatureControl(object):
                         # Blend current and desired gaps
                         new_gaps = (1.0 - kappa) * current_gaps + kappa * desired_gaps
 
-                        # Reconstruct ladder: fix betas[0] and betas[-1]
+                        # Reconstruct ladder: fix cold, constrain hot within bounds
                         betas_new = np.empty_like(self.betas)
                         betas_new[0] = self.betas[0]  # Cold chain always at β=1
                         betas_new[1:] = betas_new[0] + np.cumsum(new_gaps)
 
-                        # Force last beta back to initial value to prevent drift
-                        betas_new[-1] = self.betas[-1]
+                        # Constrain hot endpoint: prevent collapse AND allow reasonable adaptation
+                        # Store initial beta at first adaptation step to set bounds
+                        if not hasattr(self, 'beta_hot_initial'):
+                            self.beta_hot_initial = self.betas[-1]
+
+                        # Allow hot endpoint to adapt within ±50% of initial value
+                        # This respects user's Tmax choice while preventing collapse to 0
+                        beta_min = self.beta_hot_initial * 0.5  # Tmax can at most double
+                        beta_max = self.beta_hot_initial * 1.5  # Tmax can at most halve
+                        betas_new[-1] = np.clip(betas_new[-1], beta_min, beta_max)
 
                         self.betas = betas_new
                     # else: ntemps <= 2, no intermediate temperatures to adapt
