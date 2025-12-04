@@ -702,6 +702,7 @@ class HDFBackend(Backend):
         accepted,
         rj_accepted=None,
         swaps_accepted=None,
+        swaps_proposed=None,
         moves_accepted_fraction=None,
     ):
         """Save a step to the backend
