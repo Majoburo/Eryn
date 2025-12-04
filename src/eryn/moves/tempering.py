@@ -276,11 +276,6 @@ class TemperatureControl(object):
         self.skip_swap_supp_names = skip_swap_supp_names
         self.non_adjacent_swaps = non_adjacent_swaps
 
-        # Running variance of log-likelihood per temperature (EWMA), for thermo-length spacing
-        self.var_logl = np.zeros(self.ntemps, dtype=float)
-        self._var_alpha = 0.05  # EWMA blending for variance updates
-        self.thermo_adapt = False  # when True, use variance-based ladder adaptation
-
         # number of times adapted
         self.time = 0
 
@@ -533,10 +528,6 @@ class TemperatureControl(object):
 
         ntemps, nwalkers = self.ntemps, self.nwalkers
 
-        # Update EWMA of per-temperature logl variance (energy fluctuations)
-        cur_var = np.var(logl, axis=1)
-        self.var_logl = (1.0 - self._var_alpha) * self.var_logl + self._var_alpha * cur_var
-
         # prepare information on how many swaps are accepted this time
         if self.non_adjacent_swaps:
             # For non-adjacent, track all pairs in a matrix, but also track adjacent for adaptation
@@ -650,58 +641,11 @@ class TemperatureControl(object):
         else:
             ratios = self.swaps_accepted / self.swaps_proposed
 
-        # Optional: thermodynamic-length spacing using running Var_beta[U]
-        use_thermo = self.thermo_adapt and np.all(np.isfinite(self.var_logl)) and np.any(self.var_logl > 0)
-
         # adapt if desired
         if self.adaptive and self.ntemps > 1:
             if self.stop_adaptation < 0 or self.time < self.stop_adaptation:
-                if use_thermo:
-                    # Adjust neighbor gaps toward const / sqrt(var)
-                    # IMPORTANT: Fix both endpoints (cold and hot chains don't move)
-                    # Only adapt intermediate temperatures betas[1:-1]
-                    if self.ntemps > 2:
-                        # Current gaps (negative for descending betas)
-                        current_gaps = np.diff(self.betas)
-
-                        # Total span to preserve (negative)
-                        total_span = np.sum(current_gaps)
-
-                        # Variance weights (higher variance → larger gap magnitude)
-                        w = 1.0 / np.sqrt(np.maximum(self.var_logl[:-1], 1e-12))
-                        w /= np.sum(w)
-
-                        # Desired gap sizes (maintain negative sign for descending)
-                        desired_gaps = total_span * w
-
-                        # Hyperbolic decay step size
-                        decay = self.adaptation_lag / (self.time + self.adaptation_lag)
-                        kappa = decay / self.adaptation_time
-
-                        # Blend current and desired gaps
-                        new_gaps = (1.0 - kappa) * current_gaps + kappa * desired_gaps
-
-                        # Reconstruct ladder: fix cold, constrain hot within bounds
-                        betas_new = np.empty_like(self.betas)
-                        betas_new[0] = self.betas[0]  # Cold chain always at β=1
-                        betas_new[1:] = betas_new[0] + np.cumsum(new_gaps)
-
-                        # Constrain hot endpoint: prevent collapse AND allow reasonable adaptation
-                        # Store initial beta at first adaptation step to set bounds
-                        if not hasattr(self, 'beta_hot_initial'):
-                            self.beta_hot_initial = self.betas[-1]
-
-                        # Allow hot endpoint to adapt within ±50% of initial value
-                        # This respects user's Tmax choice while preventing collapse to 0
-                        beta_min = self.beta_hot_initial * 0.5  # Tmax can at most double
-                        beta_max = self.beta_hot_initial * 1.5  # Tmax can at most halve
-                        betas_new[-1] = np.clip(betas_new[-1], beta_min, beta_max)
-
-                        self.betas = betas_new
-                    # else: ntemps <= 2, no intermediate temperatures to adapt
-                else:
-                    dbetas = self._get_ladder_adjustment(self.time, self.betas, ratios)
-                    self.betas += dbetas
+                dbetas = self._get_ladder_adjustment(self.time, self.betas, ratios)
+                self.betas += dbetas
             # only increase time if it is adaptive
             self.time += 1
 
