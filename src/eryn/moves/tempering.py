@@ -235,6 +235,9 @@ class TemperatureControl(object):
             swaps. (default: ``True``)
         skip_swap_supp_names (list, optional): List of strings that indicate supplemental keys that are not to be swapped.
             (default: ``[]``)
+        non_adjacent_swaps (bool, optional): If ``True``, allow swaps between any pair of temperatures
+            (not just adjacent). This can significantly improve mixing with many temperature levels.
+            See Sambridge (2014) GJI 196:357-374. (default: ``False``)
 
 
     """
@@ -252,6 +255,7 @@ class TemperatureControl(object):
         stop_adaptation=-1,
         permute=True,
         skip_swap_supp_names=[],
+        non_adjacent_swaps=False,
     ):
 
         if betas is None:
@@ -270,6 +274,7 @@ class TemperatureControl(object):
         self.ntemps = ntemps = len(betas)
         self.permute = permute
         self.skip_swap_supp_names = skip_swap_supp_names
+        self.non_adjacent_swaps = non_adjacent_swaps
 
         # number of times adapted
         self.time = 0
@@ -279,7 +284,16 @@ class TemperatureControl(object):
         self.adaptation_time, self.adaptation_lag = adaptation_time, adaptation_lag
         self.stop_adaptation = stop_adaptation
 
-        self.swaps_proposed = np.full(self.ntemps - 1, self.nwalkers)
+        # For adjacent swaps: (ntemps-1,) array
+        # For non-adjacent swaps: (ntemps, ntemps) matrix
+        if self.non_adjacent_swaps:
+            self.swaps_proposed = np.zeros((self.ntemps, self.ntemps))
+            self.swaps_accepted_matrix = np.zeros((self.ntemps, self.ntemps))
+            # Track adjacent pairs separately for proper statistics
+            self.adj_swaps_proposed = np.zeros(self.ntemps - 1)
+            self.adj_swaps_accepted = np.zeros(self.ntemps - 1)
+        else:
+            self.swaps_proposed = np.full(self.ntemps - 1, self.nwalkers)
 
     def compute_log_posterior_tempered(self, logl, logp, betas=None):
         """Compute the log of the tempered posterior
@@ -352,7 +366,7 @@ class TemperatureControl(object):
         self,
         i,
         iperm_sel,
-        i1perm_sel,
+        jperm_sel,
         dbeta,
         x,
         logP,
@@ -362,7 +376,12 @@ class TemperatureControl(object):
         blobs=None,
         supps=None,
         branch_supps=None,
+        j=None,
     ):
+
+        # j defaults to i-1 for adjacent swaps (backward compatibility)
+        if j is None:
+            j = i - 1
 
         # for x and inds, just do full copy
         x_temp = {name: np.copy(x[name]) for name in x}
@@ -381,19 +400,19 @@ class TemperatureControl(object):
         if supps is not None:
             supps_temp = deepcopy(supps[i, iperm_sel])
 
-        # swap from i1 to i
+        # swap from j to i
         for name in x:
             # coords first
-            x[name][i, iperm_sel, :, :] = x[name][i - 1, i1perm_sel, :, :]
+            x[name][i, iperm_sel, :, :] = x[name][j, jperm_sel, :, :]
 
             # then inds
             if inds is not None:
-                inds[name][i, iperm_sel, :] = inds[name][i - 1, i1perm_sel, :]
+                inds[name][i, iperm_sel, :] = inds[name][j, jperm_sel, :]
 
             # do something special for branch_supps in case in contains a large amount of data
             # that is heavy to copy
             if branch_supps[name] is not None:
-                tmp = branch_supps[name][i - 1, i1perm_sel, :]
+                tmp = branch_supps[name][j, jperm_sel, :]
 
                 for key in self.skip_swap_supp_names:
                     tmp.pop(key)
@@ -442,42 +461,42 @@ class TemperatureControl(object):
                         (temp_inds_i1, walker_inds_i1, leaf_inds_i1)
                     ] = bring_back_branch_supps"""
 
-        # switch everythin else from i1 to i
-        logl[i, iperm_sel] = logl[i - 1, i1perm_sel]
-        logp[i, iperm_sel] = logp[i - 1, i1perm_sel]
-        logP[i, iperm_sel] = logP[i - 1, i1perm_sel] - dbeta * logl[i - 1, i1perm_sel]
+        # switch everything else from j to i
+        logl[i, iperm_sel] = logl[j, jperm_sel]
+        logp[i, iperm_sel] = logp[j, jperm_sel]
+        logP[i, iperm_sel] = logP[j, jperm_sel] - dbeta * logl[j, jperm_sel]
         if blobs is not None:
-            blobs[i, iperm_sel] = blobs[i - 1, i1perm_sel]
+            blobs[i, iperm_sel] = blobs[j, jperm_sel]
         if supps is not None:
-            tmp_supps = supps[i - 1, i1perm_sel]
+            tmp_supps = supps[j, jperm_sel]
             for key in self.skip_swap_supp_names:
                 tmp_supps.pop(key)
             supps[i, iperm_sel] = tmp_supps
 
-        # switch x from i to i1
+        # switch x from i to j
         for name in x:
-            x[name][i - 1, i1perm_sel, :, :] = x_temp[name][i, iperm_sel, :, :]
+            x[name][j, jperm_sel, :, :] = x_temp[name][i, iperm_sel, :, :]
             if inds is not None:
-                inds[name][i - 1, i1perm_sel, :] = inds_temp[name][i, iperm_sel, :]
+                inds[name][j, jperm_sel, :] = inds_temp[name][i, iperm_sel, :]
             if branch_supps[name] is not None:
                 tmp = branch_supps_temp[name][i, iperm_sel, :]
 
                 for key in self.skip_swap_supp_names:
                     tmp.pop(key)
-                branch_supps[name][i - 1, i1perm_sel, :] = tmp
+                branch_supps[name][j, jperm_sel, :] = tmp
 
-        # switch the rest from i to i1
-        logl[i - 1, i1perm_sel] = logl_temp
-        logp[i - 1, i1perm_sel] = logp_temp
-        logP[i - 1, i1perm_sel] = logP_temp + dbeta * logl_temp
+        # switch the rest from i to j
+        logl[j, jperm_sel] = logl_temp
+        logp[j, jperm_sel] = logp_temp
+        logP[j, jperm_sel] = logP_temp + dbeta * logl_temp
 
         if blobs is not None:
-            blobs[i - 1, i1perm_sel] = blobs_temp
+            blobs[j, jperm_sel] = blobs_temp
         if supps is not None:
             tmp_supps = supps_temp
             for key in self.skip_swap_supp_names:
                 tmp_supps.pop(key)
-            supps[i - 1, i1perm_sel] = tmp_supps
+            supps[j, jperm_sel] = tmp_supps
 
         return (x, logP, logl, logp, inds, blobs, supps, branch_supps)
 
@@ -486,8 +505,9 @@ class TemperatureControl(object):
     ):
         """Perform parallel-tempering temperature swaps
 
-        This function performs the swapping between neighboring temperatures. It cascades from
-        high temperature down to low temperature.
+        This function performs the swapping between temperatures. If ``non_adjacent_swaps=True``,
+        swaps can occur between any pair of temperatures. Otherwise, it cascades from
+        high temperature down to low temperature swapping only adjacent pairs.
 
         Args:
             x (dict): Dictionary with keys as branch names and values as coordinate arrays.
@@ -509,53 +529,80 @@ class TemperatureControl(object):
         ntemps, nwalkers = self.ntemps, self.nwalkers
 
         # prepare information on how many swaps are accepted this time
-        self.swaps_accepted = np.empty(ntemps - 1)
+        if self.non_adjacent_swaps:
+            # For non-adjacent, track all pairs in a matrix, but also track adjacent for adaptation
+            self.swaps_accepted_matrix_step = np.zeros((ntemps, ntemps))
+            self.swaps_accepted = np.zeros(ntemps - 1)
+        else:
+            self.swaps_accepted = np.empty(ntemps - 1)
 
-        # iterate from highest to lowest temperatures
-        for i in range(ntemps - 1, 0, -1):
+        if self.non_adjacent_swaps:
+            # SAFE path: random disjoint pairs (uniform), size ~ ntemps/2
+            order = np.random.permutation(ntemps)
+            pair_iter = []
+            k = 0
+            while k + 1 < ntemps:
+                i = order[k + 1]
+                j = order[k]
+                pair_iter.append((int(max(i, j)), int(min(i, j))))
+                k += 2
+        else:
+            # Adjacent-only cascade from high to low: pairs are (i,j) with j=i-1
+            pair_iter = [(ntemps - 1 - k, ntemps - 2 - k) for k in range(ntemps - 1)]
 
+        # Attempt swaps for the chosen disjoint pairs
+        for (i, j) in pair_iter:
             # get both temperature rungs
             bi = self.betas[i]
-            bi1 = self.betas[i - 1]
+            bj = self.betas[j]
+            dbeta = bj - bi
 
-            # difference in inverse temps
-            dbeta = bi1 - bi
-
-            # permute the indices for the walkers in each temperature to randomize swap positions
+            # permute walker indices per temperature tier
             if self.permute:
                 iperm = np.random.permutation(nwalkers)
-                i1perm = np.random.permutation(nwalkers)
-
-            # do not permute if desired
+                jperm = np.random.permutation(nwalkers)
             else:
                 iperm = np.arange(nwalkers)
-                i1perm = np.arange(nwalkers)
+                jperm = np.arange(nwalkers)
 
-            # random draw that produces log of the acceptance fraction
+            # Acceptance test per walker
             raccept = np.log(np.random.uniform(size=nwalkers))
-
-            # log of the detailed balance fraction
-            paccept = dbeta * (logl[i, iperm] - logl[i - 1, i1perm])
-
-            # How many swaps were accepted
+            paccept = dbeta * (logl[i, iperm] - logl[j, jperm])
             sel = paccept > raccept
-            self.swaps_accepted[i - 1] = np.sum(sel)
+            num_accepted = np.sum(sel)
 
-            (x, logP, logl, logp, inds, blobs, supps, branch_supps) = (
-                self.do_swaps_indexing(
-                    i,
-                    iperm[sel],
-                    i1perm[sel],
-                    dbeta,
-                    x,
-                    logP,
-                    logl,
-                    logp,
-                    inds=inds,
-                    blobs=blobs,
-                    supps=supps,
-                    branch_supps=branch_supps,
-                )
+            # Accounting: proposed/accepted
+            if self.non_adjacent_swaps:
+                # Store in matrix at [i, j] where i > j (lower triangle, consistent with pair_iter)
+                self.swaps_proposed[i, j] += nwalkers
+                self.swaps_accepted_matrix[i, j] += num_accepted
+                self.swaps_accepted_matrix_step[i, j] = num_accepted
+                # Track adjacent pairs separately for proper statistics
+                if abs(i - j) == 1:
+                    adj_idx = min(i, j)
+                    self.adj_swaps_proposed[adj_idx] += nwalkers
+                    self.adj_swaps_accepted[adj_idx] += num_accepted
+                    self.swaps_accepted[adj_idx] = num_accepted  # For this iteration only
+            else:
+                # adjacent mode keeps the original vector accounting; map (i,j) to swap index
+                swap_idx = i  # since j=i-1 and i goes from ntemps-1..1
+                self.swaps_accepted[swap_idx - 1] = num_accepted
+
+            # Perform the actual swaps for selected walkers
+            (x, logP, logl, logp, inds, blobs, supps, branch_supps) = self.do_swaps_indexing(
+                i,
+                iperm[sel],
+                jperm[sel],
+                dbeta,
+                x,
+                logP,
+                logl,
+                logp,
+                inds=inds,
+                blobs=blobs,
+                supps=supps,
+                branch_supps=branch_supps,
+                j=j,
             )
 
         return (x, logP, logl, logp, inds, blobs, supps, branch_supps)
@@ -584,15 +631,22 @@ class TemperatureControl(object):
 
     def adapt_temps(self):
         # determine ratios of swaps accepted to swaps proposed (the ladder is fixed)
-        ratios = self.swaps_accepted / self.swaps_proposed
+        if self.non_adjacent_swaps:
+            # For non-adjacent swaps, extract adjacent swap rates from matrices for ladder adaptation
+            # Read from lower triangle [i+1, i] (since we store pairs as [max, min])
+            adj_accepted = np.array([self.swaps_accepted_matrix[i+1, i] for i in range(self.ntemps-1)])
+            adj_proposed = np.array([self.swaps_proposed[i+1, i] for i in range(self.ntemps-1)])
+            # Avoid division by zero
+            ratios = np.where(adj_proposed > 0, adj_accepted / adj_proposed, 0.25)
+        else:
+            ratios = self.swaps_accepted / self.swaps_proposed
 
         # adapt if desired
         if self.adaptive and self.ntemps > 1:
             if self.stop_adaptation < 0 or self.time < self.stop_adaptation:
                 dbetas = self._get_ladder_adjustment(self.time, self.betas, ratios)
                 self.betas += dbetas
-
-            # only increase time if it is adaptive.
+            # only increase time if it is adaptive
             self.time += 1
 
     def temper_comps(self, state, adapt=True):
