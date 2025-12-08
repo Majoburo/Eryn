@@ -400,7 +400,16 @@ class HDFBackend(Backend):
     def key_order(self):
         """Key order of parameters for each model."""
         with self.open() as f:
-            return {key: value for key, value in f[self.name]["key_order"].attrs.items()}
+            result = {}
+            for key, value in f[self.name]["key_order"].attrs.items():
+                # Decode bytes to strings if needed
+                if hasattr(value, 'dtype') and value.dtype.kind == 'S':
+                    result[key] = [x.decode('utf-8') for x in value]
+                elif isinstance(value, bytes):
+                    result[key] = value.decode('utf-8')
+                else:
+                    result[key] = value
+            return result
 
     @property
     def nwalkers(self):
