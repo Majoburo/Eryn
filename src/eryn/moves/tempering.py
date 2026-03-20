@@ -533,6 +533,9 @@ class TemperatureControl(object):
             # For non-adjacent, track all pairs in a matrix, but also track adjacent for adaptation
             self.swaps_accepted_matrix_step = np.zeros((ntemps, ntemps))
             self.swaps_accepted = np.zeros(ntemps - 1)
+            # Per-step adjacent counters (passed to backend as deltas)
+            self.adj_swaps_proposed_step = np.zeros(ntemps - 1)
+            self.adj_swaps_accepted_step = np.zeros(ntemps - 1)
         else:
             self.swaps_accepted = np.empty(ntemps - 1)
 
@@ -582,7 +585,10 @@ class TemperatureControl(object):
                     adj_idx = min(i, j)
                     self.adj_swaps_proposed[adj_idx] += nwalkers
                     self.adj_swaps_accepted[adj_idx] += num_accepted
-                    self.swaps_accepted[adj_idx] = num_accepted  # For this iteration only
+                    # Per-step deltas for backend reporting
+                    self.adj_swaps_proposed_step[adj_idx] = nwalkers
+                    self.adj_swaps_accepted_step[adj_idx] = num_accepted
+                    self.swaps_accepted[adj_idx] = num_accepted
             else:
                 # adjacent mode keeps the original vector accounting; map (i,j) to swap index
                 swap_idx = i  # since j=i-1 and i goes from ntemps-1..1
