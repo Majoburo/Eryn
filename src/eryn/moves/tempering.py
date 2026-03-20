@@ -527,7 +527,15 @@ class TemperatureControl(object):
         ntemps, nwalkers = self.ntemps, self.nwalkers
 
         # prepare information on how many swaps are accepted this time
-        self.swaps_accepted = np.zeros(ntemps - 1) if self.non_adjacent_swaps else np.empty(ntemps - 1)
+        if self.non_adjacent_swaps:
+            # For non-adjacent, track all pairs in a matrix, but also track adjacent for adaptation
+            self.swaps_accepted_matrix_step = np.zeros((ntemps, ntemps))
+            self.swaps_accepted = np.zeros(ntemps - 1)
+            # Per-step adjacent counters (passed to backend as deltas)
+            self.adj_swaps_proposed_step = np.zeros(ntemps - 1)
+            self.adj_swaps_accepted_step = np.zeros(ntemps - 1)
+        else:
+            self.swaps_accepted = np.empty(ntemps - 1)
 
         if self.non_adjacent_swaps:
             # Per-step adjacent tracking for adaptation
@@ -579,7 +587,11 @@ class TemperatureControl(object):
                 # Per-step adjacent stats for adaptation
                 if abs(i - j) == 1:
                     adj_idx = min(i, j)
-                    self._step_adj_proposed[adj_idx] = nwalkers
+                    self.adj_swaps_proposed[adj_idx] += nwalkers
+                    self.adj_swaps_accepted[adj_idx] += num_accepted
+                    # Per-step deltas for backend reporting
+                    self.adj_swaps_proposed_step[adj_idx] = nwalkers
+                    self.adj_swaps_accepted_step[adj_idx] = num_accepted
                     self.swaps_accepted[adj_idx] = num_accepted
             else:
                 # adjacent mode: map (i,j) to swap index

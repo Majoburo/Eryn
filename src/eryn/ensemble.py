@@ -978,6 +978,14 @@ class EnsembleSampler(object):
                         accepted += accepted_out
                         if self.ntemps > 1:
                             in_model_swaps = move.temperature_control.swaps_accepted
+<<<<<<< HEAD
+=======
+                            # Get per-step adjacent swap proposals for non-adjacent mode
+                            if hasattr(move.temperature_control, 'adj_swaps_proposed_step'):
+                                in_model_swaps_proposed = move.temperature_control.adj_swaps_proposed_step.copy()
+                            else:
+                                in_model_swaps_proposed = None
+>>>>>>> 1ed088f25ba0902ff17bfdb31cb262c1c5ead1b3
                         else:
                             in_model_swaps = None
 
