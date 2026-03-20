@@ -284,14 +284,12 @@ class TemperatureControl(object):
         self.adaptation_time, self.adaptation_lag = adaptation_time, adaptation_lag
         self.stop_adaptation = stop_adaptation
 
-        # For adjacent swaps: (ntemps-1,) array
-        # For non-adjacent swaps: (ntemps, ntemps) matrix
         if self.non_adjacent_swaps:
+            # Cumulative matrix for diagnostics (all-pair acceptance rates)
             self.swaps_proposed = np.zeros((self.ntemps, self.ntemps))
             self.swaps_accepted_matrix = np.zeros((self.ntemps, self.ntemps))
-            # Track adjacent pairs separately for proper statistics
-            self.adj_swaps_proposed = np.zeros(self.ntemps - 1)
-            self.adj_swaps_accepted = np.zeros(self.ntemps - 1)
+            # Counter to alternate adjacent / non-adjacent sweeps
+            self._swap_step = 0
         else:
             self.swaps_proposed = np.full(self.ntemps - 1, self.nwalkers)
 
@@ -529,25 +527,27 @@ class TemperatureControl(object):
         ntemps, nwalkers = self.ntemps, self.nwalkers
 
         # prepare information on how many swaps are accepted this time
-        if self.non_adjacent_swaps:
-            # For non-adjacent, track all pairs in a matrix, but also track adjacent for adaptation
-            self.swaps_accepted_matrix_step = np.zeros((ntemps, ntemps))
-            self.swaps_accepted = np.zeros(ntemps - 1)
-        else:
-            self.swaps_accepted = np.empty(ntemps - 1)
+        self.swaps_accepted = np.zeros(ntemps - 1) if self.non_adjacent_swaps else np.empty(ntemps - 1)
 
         if self.non_adjacent_swaps:
-            # SAFE path: random disjoint pairs (uniform), size ~ ntemps/2
-            order = np.random.permutation(ntemps)
-            pair_iter = []
-            k = 0
-            while k + 1 < ntemps:
-                i = order[k + 1]
-                j = order[k]
-                pair_iter.append((int(max(i, j)), int(min(i, j))))
-                k += 2
+            # Per-step adjacent tracking for adaptation
+            self._step_adj_proposed = np.full(ntemps - 1, nwalkers)
+
+            # Alternate: even steps → full adjacent sweep, odd steps → random non-adjacent pairs
+            if self._swap_step % 2 == 0:
+                pair_iter = [(i, i - 1) for i in range(ntemps - 1, 0, -1)]
+            else:
+                order = np.random.permutation(ntemps)
+                pair_iter = []
+                k = 0
+                while k + 1 < ntemps:
+                    i = order[k + 1]
+                    j = order[k]
+                    pair_iter.append((int(max(i, j)), int(min(i, j))))
+                    k += 2
+            self._swap_step += 1
         else:
-            # Adjacent-only cascade from high to low: pairs are (i,j) with j=i-1
+            # Adjacent-only cascade from high to low
             pair_iter = [(ntemps - 1 - k, ntemps - 2 - k) for k in range(ntemps - 1)]
 
         # Attempt swaps for the chosen disjoint pairs
@@ -573,20 +573,17 @@ class TemperatureControl(object):
 
             # Accounting: proposed/accepted
             if self.non_adjacent_swaps:
-                # Store in matrix at [i, j] where i > j (lower triangle, consistent with pair_iter)
+                # Cumulative matrix for diagnostics
                 self.swaps_proposed[i, j] += nwalkers
                 self.swaps_accepted_matrix[i, j] += num_accepted
-                self.swaps_accepted_matrix_step[i, j] = num_accepted
-                # Track adjacent pairs separately for proper statistics
+                # Per-step adjacent stats for adaptation
                 if abs(i - j) == 1:
                     adj_idx = min(i, j)
-                    self.adj_swaps_proposed[adj_idx] += nwalkers
-                    self.adj_swaps_accepted[adj_idx] += num_accepted
-                    self.swaps_accepted[adj_idx] = num_accepted  # For this iteration only
+                    self._step_adj_proposed[adj_idx] = nwalkers
+                    self.swaps_accepted[adj_idx] = num_accepted
             else:
-                # adjacent mode keeps the original vector accounting; map (i,j) to swap index
-                swap_idx = i  # since j=i-1 and i goes from ntemps-1..1
-                self.swaps_accepted[swap_idx - 1] = num_accepted
+                # adjacent mode: map (i,j) to swap index
+                self.swaps_accepted[i - 1] = num_accepted
 
             # Perform the actual swaps for selected walkers
             (x, logP, logl, logp, inds, blobs, supps, branch_supps) = self.do_swaps_indexing(
@@ -630,14 +627,15 @@ class TemperatureControl(object):
         return betas - betas0
 
     def adapt_temps(self):
-        # determine ratios of swaps accepted to swaps proposed (the ladder is fixed)
+        # determine ratios of swaps accepted to swaps proposed (per-step)
         if self.non_adjacent_swaps:
-            # For non-adjacent swaps, extract adjacent swap rates from matrices for ladder adaptation
-            # Read from lower triangle [i+1, i] (since we store pairs as [max, min])
-            adj_accepted = np.array([self.swaps_accepted_matrix[i+1, i] for i in range(self.ntemps-1)])
-            adj_proposed = np.array([self.swaps_proposed[i+1, i] for i in range(self.ntemps-1)])
-            # Avoid division by zero
-            ratios = np.where(adj_proposed > 0, adj_accepted / adj_proposed, 0.25)
+            # Use per-step adjacent stats; fall back to 0.25 for pairs not proposed this step
+            safe_proposed = np.where(self._step_adj_proposed > 0, self._step_adj_proposed, 1.0)
+            ratios = np.where(
+                self._step_adj_proposed > 0,
+                self.swaps_accepted / safe_proposed,
+                0.25,
+            )
         else:
             ratios = self.swaps_accepted / self.swaps_proposed
 
